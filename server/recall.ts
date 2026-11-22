@@ -165,6 +165,20 @@ export function memoryPassages(botId: string, query: string): RecallPassage[] {
     .map((hit) => ({ source: "memory" as const, label: hit.file, at: hit.at, snippet: plain(hit.snippet) }));
 }
 
+export function laterMention(hit: RecallHit, query: string): RecallHit | null {
+  if (hit.kind === "digest") return null;
+  const asked = new Set(recallTerms(query));
+  const named = recallTerms(plain(hit.snippet)).filter((term) => !asked.has(term) && (term.length >= 3 || /\d/.test(term)));
+  if (!named.length) return null;
+  try {
+    return recallMessages(named.join(" "), [hit.threadId], CONVERSATION_HITS * 3, { since: hit.at + 1 }, "any")
+      .filter((later) => later.role === hit.role && later.kind !== "digest")
+      .sort((a, b) => b.at - a.at)[0] ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export function conversationPassages(input: RecallInput, query: string): RecallPassage[] {
   if (!input.threadIds.length) return [];
   let hits: RecallHit[] = [];
@@ -173,15 +187,20 @@ export function conversationPassages(input: RecallInput, query: string): RecallP
   } catch {
     return [];
   }
-  return hits
-    .filter((hit) => enoughMatches(query, hit.snippet))
-    .slice(0, CONVERSATION_HITS)
-    .map((hit) => ({
-      source: "conversation" as const,
-      label: input.label(hit.threadId),
-      at: hit.at,
-      snippet: hit.kind === "digest" ? `[what you did] ${plain(hit.snippet)}` : `${input.author(hit)}: ${plain(hit.snippet)}`,
-    }));
+  const found = hits.filter((hit) => enoughMatches(query, hit.snippet)).slice(0, CONVERSATION_HITS);
+  const shown = new Set(found.map((hit) => `${hit.threadId}\n${hit.messageId}`));
+  const withLater = found.flatMap((hit) => {
+    const later = laterMention(hit, query);
+    if (!later || shown.has(`${later.threadId}\n${later.messageId}`)) return [hit];
+    shown.add(`${later.threadId}\n${later.messageId}`);
+    return [hit, later];
+  });
+  return withLater.map((hit) => ({
+    source: "conversation" as const,
+    label: input.label(hit.threadId),
+    at: hit.at,
+    snippet: hit.kind === "digest" ? `[what you did] ${plain(hit.snippet)}` : `${input.author(hit)}: ${plain(hit.snippet)}`,
+  }));
 }
 
 export function buildRecall(input: RecallInput): RecallResult | null {
